@@ -1,0 +1,1575 @@
+window._preloaderTasks = (window._preloaderTasks || 0) + 1;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST — custom tag parsers
+// Each function receives the current HTML string and returns a modified string.
+// Available in all post types (regular and cinematic alike).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: parse key="value" or key='value' attribute pairs from a tag string
+function parseCinematicAttrs(str) {
+  const attrs = {};
+  const re = /(\w[\w-]*)=["']([^"']*)["']/g;
+  let m;
+  while ((m = re.exec(str)) !== null) attrs[m[1]] = m[2];
+  return attrs;
+}
+
+// TAG 1 — {{split image="..." side="left|right"}}...{{/split}}
+// Reuses existing .project-row / .project-row--reverse CSS.
+function parseSplitRow(html) {
+  return html.replace(/{{\s*split\s+([\s\S]*?)}}([\s\S]*?){{\s*\/split\s*}}/g, (_m, attrStr, inner) => {
+    const a     = parseCinematicAttrs(attrStr);
+    const image = a.image || '';
+    const side  = (a.side || 'left').toLowerCase();
+    const rowClass = side === 'right' ? 'project-row project-row--reverse' : 'project-row';
+    // inner is still raw markdown — parse it independently so it renders correctly
+    const parsedInner = marked.marked(inner.trim());
+    return `
+<div class="${rowClass}">
+  <div class="project-row__img project-row__img--cinematic">
+    <img src="${image}" alt="">
+  </div>
+  <div class="project-row__content">
+    ${parsedInner}
+  </div>
+</div>`;
+  });
+}
+
+// TAG 2 — comparison slider (single-pair or multi-pair)
+// Single: {{compare before="..." after="..." label-before="..." label-after="..." animate="true"}}
+// Multi:  {{compare animate="true"}}\n| label | before | after |\n...\n{{/compare}}
+function compareMedia(src, alt, cssClass) {
+  if (src.toLowerCase().endsWith('.webm')) {
+    return '<video class="' + cssClass + '" autoplay muted loop playsinline draggable="false">'
+      + '<source src="' + src + '" type="video/webm"></video>';
+  }
+  return '<img class="' + cssClass + '" src="' + src + '" alt="' + alt + '" draggable="false">';
+}
+
+function compareSelectorThumb(src) {
+  if (src.toLowerCase().endsWith('.webm')) {
+    return '<video class="img-compare-selector__thumb" muted preload="metadata" draggable="false">'
+      + '<source src="' + src + '" type="video/webm"></video>';
+  }
+  return '<img class="img-compare-selector__thumb" src="' + src + '" alt="" loading="lazy">';
+}
+
+function buildCompareSlider(before, after, lBefore, lAfter, animate) {
+  const animClass = animate ? ' img-compare--animate' : '';
+  return '<div class="img-compare' + animClass + '" style="--pos:50%">'
+    + compareMedia(after,  lAfter,  'img-compare__img img-compare__img--after')
+    + compareMedia(before, lBefore, 'img-compare__img img-compare__img--before')
+    + '<div class="img-compare__divider"><div class="img-compare__handle">'
+    + '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8.59 16.59L4 12l4.59-4.59L7.17 6 1 12l6.17 6zm6.82 0L20 12l-4.59-4.59L16.83 6 23 12l-6.17 6z" fill="#fff"/></svg>'
+    + '</div></div>'
+    + '<span class="img-compare__label img-compare__label--before">' + lBefore + '</span>'
+    + '<span class="img-compare__label img-compare__label--after">' + lAfter + '</span>'
+    + '</div>';
+}
+
+async function parseCompare(html) {
+  const unitsMap = await loadUnitsMap();
+  function resolveLabel(val) { return (val && unitsMap[val]) ? unitsMap[val].name : val; }
+
+  // Multi-pair (wrapping syntax) — must run before self-closing to avoid mismatches
+  html = html.replace(/{{\s*compare\s*([\s\S]*?)}}([\s\S]*?){{\s*\/compare\s*}}/g, function (_m, attrStr, inner) {
+    const a       = parseCinematicAttrs(attrStr);
+    const animate = a.animate === 'true';
+
+    const tmp = document.createElement('div');
+    tmp.innerHTML = marked.marked(inner.trim());
+    const table = tmp.querySelector('table');
+    if (!table) return marked.marked(inner.trim());
+
+    const headers  = Array.from(table.querySelectorAll('thead th')).map(function (th) { return th.textContent.trim().toLowerCase(); });
+    const iLabel   = headers.indexOf('label');
+    const iBefore  = headers.indexOf('before');
+    const iAfter   = headers.indexOf('after');
+    const iLBefore = headers.indexOf('label-before');
+    const iLAfter  = headers.indexOf('label-after');
+    if (iBefore < 0 || iAfter < 0) return tmp.innerHTML;
+
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map(function (tr) {
+      const cells = Array.from(tr.querySelectorAll('td'));
+      function cell(i) { return i >= 0 && cells[i] ? cells[i].textContent.trim() : ''; }
+      return {
+        label:   resolveLabel(cell(iLabel)),
+        before:  cell(iBefore),
+        after:   cell(iAfter),
+        lBefore: resolveLabel(cell(iLBefore) || 'Before'),
+        lAfter:  resolveLabel(cell(iLAfter)  || 'After'),
+      };
+    }).filter(function (r) { return r.before && r.after; });
+    if (rows.length === 0) return tmp.innerHTML;
+
+    const selectorBtns = rows.map(function (r, i) {
+      return '<button class="img-compare-selector__btn' + (i === 0 ? ' active' : '') + '" data-compare-idx="' + i + '">'
+        + compareSelectorThumb(r.before)
+        + '<span class="img-compare-selector__label">' + (r.label || ('Option ' + (i + 1))) + '</span>'
+        + '</button>';
+    }).join('');
+
+    const panels = rows.map(function (r, i) {
+      return '<div class="img-compare-panel' + (i === 0 ? ' active' : '') + '">'
+        + buildCompareSlider(r.before, r.after, r.lBefore, r.lAfter, i === 0 && animate)
+        + '</div>';
+    }).join('');
+
+    return '<div class="img-compare-wrap">'
+      + '<div class="img-compare-selector">' + selectorBtns + '</div>'
+      + '<div class="img-compare-panels">' + panels + '</div>'
+      + '</div>';
+  });
+
+  // Single-pair (self-closing, backward-compatible)
+  html = html.replace(/{{\s*compare\s+([\s\S]*?)\s*}}/g, function (_m, attrStr) {
+    const a = parseCinematicAttrs(attrStr);
+    if (!a.before || !a.after) return '';
+    return buildCompareSlider(a.before, a.after, resolveLabel(a['label-before'] || 'Before'), resolveLabel(a['label-after'] || 'After'), a.animate === 'true');
+  });
+
+  return html;
+}
+
+// TAG 3 — {{map-gallery}}...table...{{/map-gallery}}
+// Tabbed gallery; clicking an image opens Magnific Popup fullscreen zoom.
+function parseMapGallery(html) {
+  return html.replace(/{{\s*map-gallery\s*}}([\s\S]*?){{\s*\/map-gallery\s*}}/g, (_m, inner) => {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = inner;
+    const table = tmp.querySelector('table');
+    if (!table) return inner;
+
+    const headers = Array.from(table.querySelectorAll('thead th'))
+                         .map(th => th.textContent.trim().toLowerCase());
+    const tabIdx   = headers.indexOf('tab');
+    const imageIdx = headers.indexOf('image');
+    if (tabIdx < 0 || imageIdx < 0) return inner;
+
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr => {
+      const cells = Array.from(tr.querySelectorAll('td'));
+      return {
+        tab:   cells[tabIdx]   ? cells[tabIdx].textContent.trim()   : '',
+        image: cells[imageIdx] ? cells[imageIdx].textContent.trim() : '',
+      };
+    }).filter(r => r.tab && r.image);
+
+    if (rows.length === 0) return inner;
+
+    const uid = 'mg' + Math.random().toString(36).slice(2, 7);
+
+    const tabs = rows.map((r, i) =>
+      `<button class="map-gallery__tab${i === 0 ? ' active' : ''}" data-mg-idx="${i}">${r.tab}</button>`
+    ).join('');
+
+    const panels = rows.map((r, i) =>
+      `<div class="map-gallery__panel${i === 0 ? ' active' : ''}" data-mg-panel="${uid}-${i}">
+         <a href="${r.image}" class="map-gallery__zoom-link">
+           <img src="${r.image}" alt="${r.tab}" class="map-gallery__img">
+         </a>
+       </div>`
+    ).join('');
+
+    return `
+<div class="map-gallery" id="${uid}">
+  <div class="map-gallery__tabs">${tabs}</div>
+  <div class="map-gallery__panels">${panels}</div>
+</div>`;
+  });
+}
+
+// TAG 3 — {{featured title="..."}}...table...{{/featured}}
+// Responsive 3-column card grid for highlighted content (units, reworks, features, etc.).
+function parseFeatured(html) {
+  return html.replace(/{{\s*featured\s*([\s\S]*?)}}([\s\S]*?){{\s*\/featured\s*}}/g, (_m, attrStr, inner) => {
+    const a     = parseCinematicAttrs(attrStr);
+    const title = a.title || '';
+
+    const tmp = document.createElement('div');
+    tmp.innerHTML = inner;
+    const table = tmp.querySelector('table');
+    if (!table) return inner;
+
+    const headers = Array.from(table.querySelectorAll('thead th'))
+                         .map(th => th.textContent.trim().toLowerCase());
+    const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr => {
+      const cells = Array.from(tr.querySelectorAll('td'));
+      const row = {};
+      headers.forEach((h, i) => { row[h] = cells[i] ? cells[i].textContent.trim() : ''; });
+      return row;
+    }).filter(r => r.name || r.image);
+
+    if (rows.length === 0) return inner;
+
+    const cards = rows.map(r => `
+<div class="col-lg-4 col-md-6">
+  <div class="featured-rework-card">
+    ${r.image ? `<img src="${r.image}" alt="${r.name||''}" class="featured-rework-card__img">` : ''}
+    <h4 class="featured-rework-card__name">${r.name||''}</h4>
+    ${r.description ? `<p class="featured-rework-card__desc">${r.description}</p>` : ''}
+  </div>
+</div>`).join('');
+
+    return `
+<div class="featured-reworks">
+  ${title ? `<h3 class="featured-reworks__title">${title}</h3>` : ''}
+  <div class="row">${cards}</div>
+</div>`;
+  });
+}
+
+// 0) Helper: generate a slug from text
+const slugCounts = {};
+
+function slugify(text) {
+  const base = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w가-힣 ]+/g, '')
+    .trim()
+    .replace(/\s+/g, '-');
+
+  // Ensure uniqueness
+  let slug = base;
+  if (slugCounts[base] !== undefined) {
+    slugCounts[base] += 1;
+    slug = `${base}-${slugCounts[base]}`;
+  } else {
+    slugCounts[base] = 0;
+  }
+
+  return slug;
+}
+
+async function parseTOC(content) {
+  // Inline "Quick Access" TOC retired — strip the token from any legacy posts
+  // that still include it. Heading IDs are still assigned elsewhere if needed
+  // for future anchor linking.
+  return content.replace(/{{toc}}/g, '');
+}
+
+function initSidebarTOC() {
+  const sidebarUl = document.querySelector('.widget_categories.toc-widget .toc-sidebar');
+  if (!sidebarUl) return;
+
+  sidebarUl.innerHTML = '';
+
+  const content = document.querySelector('.blog-content');
+  const headings = Array.from(
+    content.querySelectorAll('h2, h3, h4')
+  ).filter(h => !h.classList.contains('unit-title'));
+
+  headings.forEach(h => {
+    if (!h.id) h.id = slugify(h.textContent);
+
+    const li = document.createElement('li');
+    li.className = 'cat-item';
+
+    const a = document.createElement('a');
+    a.className = 'cat-item__link';
+    a.href = `#${h.id}`;
+    a.textContent = h.textContent;
+
+    li.appendChild(a);
+    sidebarUl.appendChild(li);
+  });
+}
+
+async function parseUnitShowcase(htmlContent) {
+  const blockRe = /{{\s*unitshowcase\s*}}([\s\S]*?){{\s*\/unitshowcase\s*}}/g;
+
+  const makeHTML = (videos) => {
+    const esc = (x) => String(x ?? '').replace(/"/g, '&quot;');
+    const dataItems = videos.map(v => `
+      <div
+        data-src="${esc(v.src)}"
+        data-icon="${esc(v.icon)}"
+        data-status="${esc(v.status)}"
+        data-name="${esc(v.name)}"
+        ${v.type ? `data-type="${esc(v.type)}"` : ''}
+        ${v.duration ? `data-duration="${esc(v.duration)}"` : ''}
+      ></div>
+    `).join('');
+
+    return `
+<div class="unitshowcase">
+  <div class="unitshowcase-header">
+    <h2 class="unitshowcase-status"></h2>
+    <h4 class="unitshowcase-name"></h4>
+  </div>
+  <div class="unitshowcase-container">
+    <button class="unitshowcase-arrow left"></button>
+    <button class="unitshowcase-arrow right"></button>
+    <div class="unitshowcase-player">
+      <video class="unitshowcase-video" loading="lazy" muted playsinline></video>
+      <img class="unitshowcase-corner-icon" src="" alt="Unit Icon">
+      <svg class="unitshowcase-border" viewBox="0 0 500 275"></svg>
+      <div class="unitshowcase-progress-track">
+        <div class="unitshowcase-progress-fill"></div>
+      </div>
+    </div>
+  </div>
+  <ul class="unitshowcase-indicators"></ul>
+  <div class="unitshowcase-data" style="display:none">
+    ${dataItems}
+  </div>
+</div>`;
+  };
+
+  // Parse each block
+  return htmlContent.replace(blockRe, (_m, body) => {
+    // Split into entries by blank lines
+    const chunks = body
+      .split(/\n{2,}/)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    const videos = chunks.map(chunk => {
+      const obj = {};
+      chunk.split(/\n+/).forEach(line => {
+        // allow "key=value" or "key: value" and ignore bullets like "- key: value"
+        const cleaned = line.replace(/^\s*-\s*/, '');
+        const m = cleaned.match(/^\s*([a-zA-Z]+)\s*[:=]\s*(.+?)\s*$/);
+        if (!m) return;
+        const key = m[1].toLowerCase();
+        let val = m[2];
+
+        // strip wrapping quotes if present
+        const q = val.match(/^"(.*)"$|^'(.*)'$/);
+        if (q) val = q[1] ?? q[2];
+
+        obj[key] = val;
+      });
+      return obj;
+    }).filter(v => v.src);
+
+    if (videos.length === 0) {
+      console.warn('UnitShowcase: no valid items in block, leaving original text.');
+      return _m; // keep original text so you can see the issue
+    }
+
+    return makeHTML(videos);
+  });
+}
+
+// Format Blog Date
+
+function parseBuffNerf(content) {
+  content = decodeHtmlEntities(content);
+
+  content = content.replace(
+    /{{buff}}([\s\S]+?){{\/buff}}/g,
+    '<span class="buff">$1</span>'
+  );
+
+  content = content.replace(
+    /{{nerf}}([\s\S]+?){{\/nerf}}/g,
+    '<span class="nerf">$1</span>'
+  );
+
+  content = content.replace(
+    /{{adjust}}([\s\S]+?){{\/adjust}}/g,
+    '<span class="adjust">$1</span>'
+  );
+
+  content = content.replace(
+    /->|→/g,
+    '<span class="arrow">→</span>'
+  );
+
+  return content;
+}
+
+function buildUnitShowcaseMarkup(root, videos) {
+  const esc = (x) => String(x ?? '').replace(/"/g, '&quot;');
+  const dataItems = videos.map(v => `
+    <div
+      data-src="${esc(v.src)}"
+      data-icon="${esc(v.icon)}"
+      data-status="${esc(v.status)}"
+      data-name="${esc(v.name)}"
+      ${v.type ? `data-type="${esc(v.type)}` : ''}"
+      ${v.duration ? `data-duration="${esc(v.duration)}` : ''}"
+    ></div>
+  `).join('');
+
+  root.innerHTML = `
+    <div class="unitshowcase-header">
+      <h2 class="unitshowcase-status"></h2>
+      <h4 class="unitshowcase-name"></h4>
+    </div>
+    <div class="unitshowcase-container">
+      <button class="unitshowcase-arrow left"></button>
+      <div class="unitshowcase-player">
+        <video class="unitshowcase-video" muted playsinline></video>
+        <img class="unitshowcase-corner-icon" src="" alt="Unit Icon">
+        <svg class="unitshowcase-border" viewBox="0 0 500 275"></svg>
+        <div class="unitshowcase-progress-track">
+          <div class="unitshowcase-progress-fill"></div>
+        </div>
+      </div>
+      <button class="unitshowcase-arrow right"></button>
+    </div>
+    <ul class="unitshowcase-indicators"></ul>
+    <div class="unitshowcase-data" style="display:none">
+      ${dataItems}
+    </div>
+  `;
+}
+
+// Parse all markdown tables whose first TH is "unitshowcase", replace each with a built showcase
+function convertUnitShowcaseTables(container) {
+  const tables = container.querySelectorAll('table');
+  tables.forEach(table => {
+    const ths = table.querySelectorAll('thead th');
+    if (!ths.length) return;
+    const first = ths[0].textContent.trim().toLowerCase();
+    if (first !== 'unitshowcase') return;
+
+    // Build header map (colName -> index), skipping first marker column
+    const headers = Array.from(ths).slice(1).map(th => th.textContent.trim().toLowerCase());
+    const idx = (name) => headers.indexOf(name);
+
+    const rows = table.querySelectorAll('tbody tr');
+    const videos = [];
+    rows.forEach(tr => {
+      const tds = tr.querySelectorAll('td');
+      const getCell = (name) => {
+        const i = idx(name);
+        if (i < 0) return '';
+        const cell = tds[i+1]; // +1 because first column is the marker column
+        if (!cell) return '';
+        const link = cell.querySelector('a[href]');
+        return link ? link.getAttribute('href') : cell.textContent.trim();
+      };
+
+      const v = {
+        src:    getCell('src'),
+        icon:   getCell('icon'),
+        status: getCell('status'),
+        name:   getCell('name'),
+        type:   getCell('type'),
+        duration: getCell('duration')
+      };
+      if (v.src) videos.push(v);
+    });
+
+    // Replace the table with a showcase
+    const wrapper = document.createElement('div');
+    wrapper.className = 'unitshowcase';
+    buildUnitShowcaseMarkup(wrapper, videos);
+
+    table.replaceWith(wrapper);
+  });
+}
+
+function initUnitShowcases() {
+  document
+    .querySelectorAll('.unitshowcase:not([data-initialized])')
+    .forEach(root => {
+      new UnitShowcase(root);
+      root.setAttribute('data-initialized', '1'); // guard against double-init
+    });
+}
+
+// Function to load unit data from units.json
+document.addEventListener('DOMContentLoaded', async () => {
+  const pageKey = document.body.dataset.page || 'index';
+  const locale = localStorage.getItem('locale') || 'enUS';
+
+  await loadLocaleTexts(locale, pageKey);
+  const tagDisplayMap = await fetchTagsMap(locale);
+
+  applyTexts();
+
+  const params = new URLSearchParams(window.location.search);
+  const postId = params.get('p') || window.location.pathname.split('/').pop().replace('.html', '');
+
+ 
+
+  const frontMatter = extractFrontMatter(markdownContent);
+
+  if (frontMatter.title) {
+    const t = clean(frontMatter.title);
+    document.title = t;
+    const titleEl = document.head.querySelector('title');
+    if (titleEl) titleEl.textContent = t;
+  }
+
+  // Cinematic post detection
+  const isCinematic = clean(frontMatter.type).toLowerCase() === 'cinematic';
+  if (isCinematic) {
+    document.body.classList.add('cinematic-post');
+    // Mark sidebar and content columns so CSS can target them reliably
+    document.querySelector('.sidebar-area')
+      ?.closest('[class*="col-"]')?.classList.add('post-sidebar-col');
+    document.querySelector('#blog-content')
+      ?.closest('[class*="col-"]')?.classList.add('post-content-col');
+
+    const hero = document.getElementById('cinematic-hero');
+    if (hero) {
+      // Pull hero behind the sticky header so the bg covers the full viewport top
+      const headerEl = document.getElementById('header');
+      if (headerEl) {
+        const hh = headerEl.offsetHeight;
+        hero.style.marginTop = `-${hh}px`;
+        hero.style.height    = `calc(100vh + ${hh}px)`;
+        hero.style.minHeight = `calc(680px + ${hh}px)`;
+      }
+
+      // Background image
+      const bg = clean(frontMatter['cinematic-bg']);
+      if (bg) hero.style.backgroundImage = `url('${bg}')`;
+
+      // Subtitle text
+      const subtitle  = clean(frontMatter['cinematic-subtitle']);
+      const subTextEl = hero.querySelector('.cinematic-hero__sub-text');
+      if (subTextEl && subtitle) subTextEl.textContent = subtitle;
+
+      // Detect slow connection or reduced-motion preference → use static fallback
+      const useStatic = (
+        (navigator.connection && ['slow-2g', '2g'].includes(navigator.connection.effectiveType)) ||
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      );
+
+      // Helper: configure a model slot
+      function applyModel(slotId, srcKey, posterKey, xKey, yKey, scaleKey, widthKey) {
+        const slot   = document.getElementById(slotId);
+        const src    = clean(frontMatter[srcKey]);
+        const poster = clean(frontMatter[posterKey]);
+        if (!slot || !src) return;
+
+        slot.style.display = 'block'; // override the CSS display:none on --2 variant
+
+        const sourceEl = slot.querySelector('source');
+        const videoEl  = slot.querySelector('video');
+        const stillEl  = slot.querySelector('.cinematic-hero__model-still');
+
+        if (sourceEl) sourceEl.src = src;
+        if (poster && videoEl)  videoEl.poster = poster;
+        if (poster && stillEl)  stillEl.src    = poster;
+        if (videoEl) videoEl.load();
+
+        if (useStatic) slot.classList.add('cinematic-hero__model--static');
+
+        const varPrefix = slotId === 'cinematic-model-1' ? '' : '2-';
+        const cssVarMap = {
+          [`--model${varPrefix === '' ? '' : '2'}-x`]:     xKey,
+          [`--model${varPrefix === '' ? '' : '2'}-y`]:     yKey,
+          [`--model${varPrefix === '' ? '' : '2'}-scale`]: scaleKey,
+          [`--model${varPrefix === '' ? '' : '2'}-width`]: widthKey,
+        };
+        for (const [prop, key] of Object.entries(cssVarMap)) {
+          const val = clean(frontMatter[key]);
+          if (val) hero.style.setProperty(prop, val);
+        }
+      }
+
+      applyModel(
+        'cinematic-model-1',
+        'cinematic-model', 'cinematic-model-poster',
+        'cinematic-model-x', 'cinematic-model-y',
+        'cinematic-model-scale', 'cinematic-model-width'
+      );
+      applyModel(
+        'cinematic-model-2',
+        'cinematic-model-2', 'cinematic-model-2-poster',
+        'cinematic-model-2-x', 'cinematic-model-2-y',
+        'cinematic-model-2-scale', 'cinematic-model-2-width'
+      );
+    }
+  }
+
+  const rawContent = markdownContent.replace(/---\s*[\s\S]+?\s*---/, '').trim();
+  let listContent = processNestedLists(rawContent);
+
+  // Pre-parsers: run on raw markdown before marked.marked() so blocks are never wrapped in <p>.
+  listContent = parseSplitRow(listContent);
+  listContent = await parseCompare(listContent);
+
+  let htmlContent = marked.marked(listContent);
+
+  htmlContent = htmlContent.replace(/<h2>(.*?)<\/h2>/g, (_, txt) => `
+    <div class="stylized-header">
+      <img src="/assets/img/svg/svg-stylizeddivider.svg" alt="Divider Top">
+      <h4>${txt}</h4>
+      <img src="/assets/img/svg/svg-stylizeddivider.svg" alt="Divider Bottom">
+    </div>
+  `);
+
+  // Post-parsers: run on all post types (operate on marked HTML to read <table> elements)
+  htmlContent = parseMapGallery(htmlContent);
+  htmlContent = parseFeatured(htmlContent);
+
+  htmlContent = parseImageGallery(htmlContent);
+  htmlContent = await parseDonations(htmlContent);
+  htmlContent = await parseBadges(htmlContent);
+  htmlContent = await parseUnitContainers(htmlContent);
+  htmlContent = parseBuffNerf(htmlContent);
+  htmlContent = await parseTOC(htmlContent);
+  htmlContent = await parseUnitShowcase(htmlContent);
+
+  document.getElementById('blog-content').innerHTML =
+    `<div class="blog-content${isCinematic ? ' blog-content--cinematic' : ''}">${htmlContent}</div>`;
+
+  const blogRoot = document.getElementById('blog-content');
+  convertUnitShowcaseTables(blogRoot);
+  initUnitShowcases();
+
+  // Map gallery — tab switching (event delegation, works on dynamically injected HTML)
+  blogRoot.addEventListener('click', function (e) {
+    const tab = e.target.closest('.map-gallery__tab');
+    if (!tab) return;
+    const gallery = tab.closest('.map-gallery');
+    if (!gallery) return;
+    const tabs   = Array.from(gallery.querySelectorAll('.map-gallery__tab'));
+    const panels = Array.from(gallery.querySelectorAll('.map-gallery__panel'));
+    const idx = tabs.indexOf(tab);
+    tabs.forEach(function (t, i)   { t.classList.toggle('active', i === idx); });
+    panels.forEach(function (p, i) { p.classList.toggle('active', i === idx); });
+  });
+
+  // Map gallery — Magnific Popup modal on image click
+  if (typeof $ !== 'undefined' && $.fn.magnificPopup) {
+    $(blogRoot).find('.map-gallery__zoom-link').magnificPopup({
+      type: 'image',
+      gallery: { enabled: true, navigateByImgClick: true },
+      image:   { verticalFit: true },
+    });
+  }
+
+  // Image compare — drag to reveal + intro animation
+  const compareEls = blogRoot.querySelectorAll('.img-compare');
+  if (compareEls.length > 0) {
+    let activeCompare = null;
+
+    function setComparePos(el, clientX) {
+      const r = el.getBoundingClientRect();
+      const pos = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+      el.style.setProperty('--pos', (pos * 100) + '%');
+    }
+
+    function runCompareIntroAnimation(el) {
+      const duration = 2800;
+      const startTime = Date.now();
+      el.dataset.animating = '1';
+      function ease(t) { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
+      function tick() {
+        const p = Math.min(1, (Date.now() - startTime) / duration);
+        var pos;
+        if (p < 0.25) {
+          // 50% → 5% (sweep left)
+          pos = 50 - ease(p / 0.25) * 45;
+        } else if (p < 0.75) {
+          // 5% → 95% (sweep right)
+          pos = 5 + ease((p - 0.25) / 0.5) * 90;
+        } else {
+          // 95% → 50% (settle center)
+          pos = 95 - ease((p - 0.75) / 0.25) * 45;
+        }
+        el.style.setProperty('--pos', pos + '%');
+        if (p < 1) {
+          requestAnimationFrame(tick);
+        } else {
+          el.style.setProperty('--pos', '50%');
+          delete el.dataset.animating;
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+
+    compareEls.forEach(function (el) {
+      el.addEventListener('mousedown', function (e) {
+        if (el.dataset.animating) return;
+        activeCompare = el; setComparePos(el, e.clientX); e.preventDefault();
+      });
+      el.addEventListener('touchstart', function (e) {
+        if (el.dataset.animating) return;
+        activeCompare = el; setComparePos(el, e.touches[0].clientX);
+      }, { passive: true });
+    });
+    document.addEventListener('mousemove',  function (e) { if (activeCompare) setComparePos(activeCompare, e.clientX); });
+    document.addEventListener('mouseup',    function ()  { activeCompare = null; });
+    document.addEventListener('touchmove',  function (e) { if (activeCompare) setComparePos(activeCompare, e.touches[0].clientX); }, { passive: true });
+    document.addEventListener('touchend',   function ()  { activeCompare = null; });
+
+    // Video sync + intro animation
+    var reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // Per-slider state for elements that contain videos
+    var cmpState = new Map();
+    compareEls.forEach(function (el) {
+      if (el.querySelector('video')) cmpState.set(el, { ready: false, visible: false });
+    });
+
+    // Fires when all prerequisites are met: plays videos + optionally animates
+    function tryStartCompare(el) {
+      var state = cmpState.get(el);
+      if (!state || !state.ready) return;
+      var isAnimated = el.classList.contains('img-compare--animate');
+      if (isAnimated && !state.visible) return;
+      Array.from(el.querySelectorAll('video')).forEach(function (v) { v.play(); });
+      if (isAnimated && !reducedMotion) {
+        setTimeout(function () { runCompareIntroAnimation(el); }, 50);
+      }
+    }
+
+    // Listen for all videos in a slider to reach playable state
+    cmpState.forEach(function (state, el) {
+      var videos = Array.from(el.querySelectorAll('video'));
+      var readyCount = 0;
+      function onVideoReady() {
+        readyCount++;
+        if (readyCount < videos.length) return;
+        state.ready = true;
+        tryStartCompare(el);
+      }
+      videos.forEach(function (v) {
+        if (v.readyState >= 3) { onVideoReady(); }
+        else { v.addEventListener('canplaythrough', onVideoReady, { once: true }); }
+      });
+    });
+
+    // IntersectionObserver for animated sliders
+    var animateEls = blogRoot.querySelectorAll('.img-compare--animate');
+    if (animateEls.length > 0 && 'IntersectionObserver' in window) {
+      var introObserver = new IntersectionObserver(function (entries, observer) {
+        entries.forEach(function (entry) {
+          if (!entry.isIntersecting) return;
+          observer.unobserve(entry.target);
+          var target = entry.target;
+          var state = cmpState.get(target);
+          if (state) {
+            // Has videos — defer to readiness gate
+            state.visible = true;
+            tryStartCompare(target);
+          } else if (!reducedMotion) {
+            // No videos — animate immediately
+            setTimeout(function () { runCompareIntroAnimation(target); }, 300);
+          }
+        });
+      }, { threshold: 0.3 });
+      animateEls.forEach(function (el) { introObserver.observe(el); });
+    }
+  }
+
+  // Compare selector — tab switching (event delegation)
+  blogRoot.addEventListener('click', function (e) {
+    var btn = e.target.closest('.img-compare-selector__btn');
+    if (!btn) return;
+    var wrap = btn.closest('.img-compare-wrap');
+    if (!wrap) return;
+    var btns   = Array.from(wrap.querySelectorAll('.img-compare-selector__btn'));
+    var panels = Array.from(wrap.querySelectorAll('.img-compare-panel'));
+    var idx = btns.indexOf(btn);
+    btns.forEach(function (b, i)   { b.classList.toggle('active', i === idx); });
+    panels.forEach(function (p, i) {
+      p.classList.toggle('active', i === idx);
+      if (i === idx) {
+        var slider = p.querySelector('.img-compare');
+        if (slider) slider.style.setProperty('--pos', '50%');
+      }
+    });
+  });
+
+  initSidebarTOC();
+
+  // Cinematic floating ToC — same dot-nav system as about/campaign pages
+  if (isCinematic) {
+    const blogContent = blogRoot.querySelector('.blog-content');
+
+    // 1) Assign IDs to anchored elements:
+    //    • h3 elements inside split-row content columns
+    //    • .stylized-header wrappers (from ## headings)
+    blogContent.querySelectorAll('.project-row__content h3').forEach(function (h) {
+      if (!h.id) h.id = slugify(h.textContent);
+    });
+    blogContent.querySelectorAll('.stylized-header').forEach(function (div) {
+      if (!div.id) {
+        const h = div.querySelector('h4');
+        if (h) div.id = slugify(h.textContent);
+      }
+    });
+
+    // 2) Collect sections in DOM order
+    const tocItems = [];
+    blogContent.querySelectorAll('.project-row__content h3, .stylized-header').forEach(function (el) {
+      if (!el.id) return;
+      const label = el.tagName === 'DIV'
+        ? (el.querySelector('h4') ? el.querySelector('h4').textContent.trim() : el.id)
+        : el.textContent.trim();
+      tocItems.push({ id: el.id, label: label });
+    });
+
+    if (tocItems.length > 0) {
+      // 3) Floating desktop ToC
+      var cinToc = document.createElement('nav');
+      cinToc.className = 'about-toc';
+      cinToc.id = 'cinematic-toc';
+      cinToc.setAttribute('aria-label', 'Post sections');
+      cinToc.innerHTML = tocItems.map(function (s) {
+        return '<a href="#' + s.id + '" class="about-toc__link" data-toc-id="' + s.id + '">' +
+          '<span class="about-toc__dot"></span>' +
+          '<span class="about-toc__label">' + s.label + '</span>' +
+          '</a>';
+      }).join('');
+      document.body.appendChild(cinToc);
+
+      // 4) Mobile <details> ToC — inserted before the blog content
+      var cinTocMobile = document.createElement('details');
+      cinTocMobile.className = 'about-toc-mobile';
+      cinTocMobile.id = 'cinematic-toc-mobile';
+      cinTocMobile.innerHTML =
+        '<summary class="about-toc-mobile__summary">' +
+          '<i class="fa-solid fa-list"></i> <span>Jump to section</span>' +
+        '</summary>' +
+        '<nav class="about-toc-mobile__nav">' +
+          tocItems.map(function (s) {
+            return '<a href="#' + s.id + '" class="about-toc-mobile__link">' + s.label + '</a>';
+          }).join('') +
+        '</nav>';
+      blogRoot.parentNode.insertBefore(cinTocMobile, blogRoot);
+
+      // 5) Active-section tracking
+      var cinTocLinks       = cinToc.querySelectorAll('.about-toc__link');
+      var cinTocMobileLinks = cinTocMobile.querySelectorAll('.about-toc-mobile__link');
+      function setCinActive(id) {
+        cinTocLinks.forEach(function (l) { l.classList.toggle('active', l.dataset.tocId === id); });
+        cinTocMobileLinks.forEach(function (l) { l.classList.toggle('active', l.getAttribute('href') === '#' + id); });
+      }
+      var secObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) { if (entry.isIntersecting) setCinActive(entry.target.id); });
+      }, { rootMargin: '-25% 0px -65% 0px', threshold: 0 });
+      tocItems.forEach(function (s) {
+        var el = document.getElementById(s.id);
+        if (el) secObserver.observe(el);
+      });
+
+      // 6) Show desktop ToC once the first section enters the viewport
+      var firstEl = document.getElementById(tocItems[0].id);
+      var cinShown = false;
+      if (firstEl) {
+        var cinVisObs = new IntersectionObserver(function (entries) {
+          if (entries[0].isIntersecting && !cinShown) {
+            cinShown = true;
+            cinToc.classList.add('about-toc--visible');
+            cinVisObs.disconnect();
+          }
+        }, { threshold: 0.1 });
+        cinVisObs.observe(firstEl);
+      } else {
+        cinToc.classList.add('about-toc--visible');
+      }
+
+      // 7) Mobile: close on link click
+      cinTocMobile.querySelectorAll('a').forEach(function (a) {
+        a.addEventListener('click', function () { cinTocMobile.removeAttribute('open'); });
+      });
+    }
+  }
+
+  // 5) Breadcrumb & hero meta area
+  const blogTitleEl       = document.getElementById('blog-title');
+  const breadcrumbTitleEl = document.getElementById('breadcrumb-title');
+  const blogShortEl       = document.getElementById('blog-short-title');
+  const blogAuthorEl      = document.getElementById('blog-author');
+  const blogDateEl        = document.getElementById('blog-date');
+  const blogImageEl       = document.getElementById('blog-image');
+  const breadcrumbBgEl    = document.getElementById('breadcrumb-background');
+  const postTagEl         = document.getElementById('post-hero-tag');
+  const authorIconEl      = document.getElementById('author-icon');
+  const authorTitleEl     = document.getElementById('author-title');
+
+  const titleText = clean(frontMatter.title) || 'No Title';
+  if (blogTitleEl)       blogTitleEl.textContent       = titleText;
+  if (breadcrumbTitleEl) breadcrumbTitleEl.textContent = titleText;
+  if (blogShortEl)   blogShortEl.textContent = clean(frontMatter.short_title) || 'No Short Title';
+  if (blogDateEl)    blogDateEl.textContent  = formatBlogDate(clean(frontMatter.date));
+
+  if (blogImageEl) {
+    const bi = clean(frontMatter['blog-image']) || '/default-image-path.jpg';
+    blogImageEl.src = bi;
+    if (breadcrumbBgEl) {
+      // Only override the static fallback bg if a per-post breadcrumb file
+      // actually exists on disk. main.js's [data-bg-src] pass has already
+      // applied the HTML fallback by the time this async code runs, so a
+      // blind write here would clobber a working image with a 404.
+      const fn = bi.split('/').pop();
+      const bgUrl = `/assets/img/blog/breadcrumb-${fn}`;
+      const probe = new Image();
+      probe.onload = () => {
+        breadcrumbBgEl.setAttribute('data-bg-src', bgUrl);
+        breadcrumbBgEl.style.backgroundImage = `url('${bgUrl}')`;
+      };
+      probe.src = bgUrl;
+    }
+  }
+
+  // Hero tag pill — first tag from frontmatter, UPPERCASED
+  if (postTagEl) {
+    const tags = clean(frontMatter.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    const firstTag = tags[0] || 'POST';
+    postTagEl.textContent = (tagDisplayMap[firstTag] || firstTag).toUpperCase();
+  }
+
+  // Hero byline — author display name + avatar + (optional) title, pulled
+  // from authors.json; fall back to the raw frontmatter author string.
+  try {
+    const authors  = await fetchAuthorsMap(locale);
+    const authorId = clean(frontMatter.author);
+    const a        = authors[authorId];
+    if (blogAuthorEl) blogAuthorEl.textContent = (a && a.name) || authorId || 'Unknown Author';
+    if (a) {
+      if (authorIconEl && a.icon) authorIconEl.src = a.icon;
+      if (authorTitleEl && a.title) authorTitleEl.textContent = a.title;
+    } else {
+      console.warn(`No author data for "${authorId}"`);
+    }
+  } catch (err) {
+    console.error('Failed to load authors.json:', err);
+    if (blogAuthorEl) blogAuthorEl.textContent = clean(frontMatter.author) || 'Unknown Author';
+  }
+
+  // Localization byline — appended to .post-body-meta if front matter has it.
+  if (frontMatter.localization) {
+    const locId = clean(frontMatter.localization);
+    let locData;
+    try {
+      const authors = await fetchAuthorsMap(locale);
+      locData = authors[locId];
+    } catch (e) {
+      console.warn('Could not load authors.json for localization', e);
+    }
+    const byline = document.querySelector('.post-body-meta');
+    if (byline && locData) {
+      const span = document.createElement('span');
+      span.className = 'post-hero__localization';
+      const label = localeTexts.blogcard?.localized || 'Localized by:';
+      const avatar = locData.icon
+        ? `<img class="post-card__author-avatar" src="${locData.icon}" alt="" loading="lazy">`
+        : '';
+      span.innerHTML = `${avatar}<span>${label}</span><a href="#">${locData.name}</a>`;
+      byline.appendChild(span);
+    }
+  }
+
+  // 7) Tags
+  const tagCloudEl = document.getElementById('tag-cloud');
+  if (tagCloudEl && frontMatter.tags) {
+    const label = localeTexts.post?.tags || 'Tags:';
+    tagCloudEl.innerHTML = `<span>${label}</span> `;
+
+    const tagsArray = clean(frontMatter.tags).split(',').map(t => t.trim()).filter(Boolean);
+
+    tagsArray.forEach((tag, i) => {
+      const span = document.createElement('span');
+
+      const a = document.createElement('a');
+      a.href = `/tag/${encodeURIComponent(tag.toLowerCase())}`;
+      a.className = 'tag-cloud-link';
+      a.textContent = tagDisplayMap[tag] || tag;
+
+      span.appendChild(a);
+      if (i < tagsArray.length - 1) {
+        span.appendChild(document.createTextNode(', '));
+      }
+
+      tagCloudEl.appendChild(span);
+    });
+  }
+
+  // 8) Up Next — 3 other posts as .post-card grid.
+  const upnextGrid = document.getElementById('post-upnext-grid');
+  if (upnextGrid) {
+    try {
+      const [postsRes, authorsRes] = await Promise.all([
+        fetch('/assets/data/postList.json'),
+        fetch('/assets/data/authors.json')
+      ]);
+      const allPosts = await postsRes.json();
+      const authorMap = await authorsRes.json();
+      const currentPath = window.location.pathname;
+      const others = allPosts
+        .filter(p => p && p.link && p.title && p.link !== currentPath)
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 3);
+
+      function shortDate(d) {
+        var dt = new Date(d);
+        if (isNaN(dt)) return '';
+        return new Intl.DateTimeFormat(localeToBCP47(locale), {
+          year: 'numeric', month: 'short', day: 'numeric'
+        }).format(dt);
+      }
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+          return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+        });
+      }
+      function primaryTag(tags) {
+        if (!tags) return 'POST';
+        return tags.split(',')[0].trim().toUpperCase();
+      }
+
+      const frag = document.createDocumentFragment();
+      for (const p of others) {
+        const title = p.short_title || p.title;
+        const thumb = p['blog-image']
+          ? `<span class="post-card__thumb"><img src="${esc(p['blog-image'])}" alt="" loading="lazy"></span>`
+          : '';
+        const author = authorMap[p.author] || (p.author ? { name: p.author } : null);
+        const avatar = author && author.icon
+          ? `<img class="post-card__author-avatar" src="${esc(author.icon)}" alt="" loading="lazy">`
+          : '';
+        const authorRow = author
+          ? `<span class="post-card__author"><span class="post-card__author-name">${esc(author.name || p.author)}</span>${avatar}</span>`
+          : '';
+        const a = document.createElement('a');
+        a.className = 'post-card';
+        a.href = p.link;
+        a.innerHTML = `${thumb}
+          <span class="post-card__body">
+            <span class="post-card__meta">
+              <span class="post-card__tag">${esc(primaryTag(p.tags))}</span>
+              <span class="post-card__date">${esc(shortDate(p.date))}</span>
+            </span>
+            <span class="post-card__headline">
+              <span class="post-card__title">${esc(title)}</span>
+              ${authorRow}
+            </span>
+          </span>`;
+        frag.appendChild(a);
+      }
+      upnextGrid.appendChild(frag);
+    } catch (err) {
+      console.warn('up-next: failed to load postList/authors', err);
+    }
+  }
+
+  // 9) Floating ToC — built from stylized headers (h2) for regular posts too.
+  //    (The cinematic branch above builds its own earlier; this is a no-op there.)
+  if (!isCinematic) {
+    const blogContent = document.querySelector('.blog-content');
+    const headers = blogContent
+      ? Array.from(blogContent.querySelectorAll('.stylized-header'))
+      : [];
+    if (headers.length >= 2) {
+      const tocItems = [];
+      headers.forEach(function (div) {
+        if (!div.id) {
+          const h = div.querySelector('h4');
+          if (h) div.id = slugify(h.textContent);
+        }
+        if (!div.id) return;
+        const h = div.querySelector('h4');
+        const label = h ? h.textContent.trim() : div.id;
+        tocItems.push({ id: div.id, label: label });
+      });
+
+      if (tocItems.length) {
+        const toc = document.createElement('nav');
+        toc.className = 'about-toc';
+        toc.id = 'post-toc';
+        toc.setAttribute('aria-label', 'Post sections');
+        toc.innerHTML = tocItems.map(function (s) {
+          return '<a href="#' + s.id + '" class="about-toc__link" data-toc-id="' + s.id + '">' +
+            '<span class="about-toc__dot"></span>' +
+            '<span class="about-toc__label">' + s.label + '</span>' +
+            '</a>';
+        }).join('');
+        document.body.appendChild(toc);
+
+        const tocLinks = toc.querySelectorAll('.about-toc__link');
+        function setActive(id) {
+          tocLinks.forEach(function (l) { l.classList.toggle('active', l.dataset.tocId === id); });
+        }
+        const secObs = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) { if (e.isIntersecting) setActive(e.target.id); });
+        }, { rootMargin: '-25% 0px -65% 0px', threshold: 0 });
+        tocItems.forEach(function (s) {
+          const el = document.getElementById(s.id);
+          if (el) secObs.observe(el);
+        });
+
+        const firstEl = document.getElementById(tocItems[0].id);
+        if (firstEl) {
+          const visObs = new IntersectionObserver(function (entries) {
+            if (entries[0].isIntersecting) {
+              toc.classList.add('about-toc--visible');
+              visObs.disconnect();
+            }
+          }, { threshold: 0.1 });
+          visObs.observe(firstEl);
+        } else {
+          toc.classList.add('about-toc--visible');
+        }
+      }
+    }
+  }
+
+  document.dispatchEvent(new Event('app:content-ready'));
+});
+
+/**
+ * Process Markdown text to correctly handle nested lists based on indentation
+ * @param {string} markdownText - The raw markdown text
+ * @return {string} - Processed markdown with proper list nesting
+ */
+function processNestedLists(markdownText) {
+  const lines = markdownText.split('\n');
+  const processedLines = [];
+
+  let inListBlock = false;
+  let listBlock = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const listItemMatch = line.match(/^(\s*)[-*] (.+)$/);
+
+    if (listItemMatch) {
+      if (!inListBlock) {
+        inListBlock = true;
+        listBlock = [];
+      }
+
+      listBlock.push(line);
+    } else if (inListBlock && line.trim() === '') {
+
+      processedLines.push(...processListBlock(listBlock));
+      listBlock = [];
+      inListBlock = false;
+      processedLines.push(line); // Keep the empty line
+    } else {
+
+      if (inListBlock) {
+
+        processedLines.push(...processListBlock(listBlock));
+        listBlock = [];
+        inListBlock = false;
+      }
+      processedLines.push(line);
+    }
+  }
+
+
+  if (inListBlock && listBlock.length > 0) {
+    processedLines.push(...processListBlock(listBlock));
+  }
+
+  return processedLines.join('\n');
+}
+
+/**
+ * Process a block of list items to create proper nesting based on indentation
+ * @param {string[]} listBlock - Array of markdown list item lines
+ * @return {string[]} - Array of properly formatted markdown list items
+ */
+function processListBlock(listBlock) {
+  if (!listBlock || listBlock.length === 0) return [];
+
+  const processedBlock = [];
+  const indentationLevels = [];
+
+  for (const line of listBlock) {
+    const match = line.match(/^(\s*)[-*] /);
+    if (match) {
+      const indentation = match[1].length;
+      if (!indentationLevels.includes(indentation)) {
+        indentationLevels.push(indentation);
+      }
+    }
+  }
+
+  indentationLevels.sort((a, b) => a - b);
+
+  for (const line of listBlock) {
+    const match = line.match(/^(\s*)[-*] (.+)$/);
+    if (match) {
+      const indentation = match[1].length;
+      const content = match[2];
+
+      const level = indentationLevels.indexOf(indentation);
+
+      const normalizedIndentation = '  '.repeat(level);
+      processedBlock.push(`${normalizedIndentation}- ${content}`);
+    }
+  }
+
+  return processedBlock;
+}
+
+function decodeHtmlEntities(text) {
+  const textArea = document.createElement('textarea');
+  textArea.innerHTML = text;
+  return textArea.value;
+}
+
+function parseImageGallery(content) {
+  content = decodeHtmlEntities(content);
+
+  // Single image gallery
+  content = content.replace(/{{image-gallery type="single" image="([^"]+)"}}/g, (match, imagePath) => {
+    return `
+      <div class="row gx-0">
+        <div class="col-12 mb-30">
+          <figure class="wp-block-image text-center">
+            <img src="${imagePath}" loading="lazy" alt="blog" class="img-fluid mx-auto d-block image-clickable" style="width: 100%; height: auto;">
+          </figure>
+        </div>
+      </div>
+    `;
+  });
+
+  // Double image gallery
+  content = content.replace(/{{image-gallery type="double" image1="([^"]+)" image2="([^"]+)"}}/g, (match, imagePath1, imagePath2) => {
+    return `
+      <div class="row gx-20">
+        <div class="col-xl-6 col-md-6 mb-30">
+          <figure class="wp-block-image">
+            <img src="${imagePath1}" loading="lazy" class="image-clickable" alt="blog">
+          </figure>
+        </div>
+        <div class="col-xl-6 col-md-6 mb-30">
+          <figure class="wp-block-image">
+            <img src="${imagePath2}" loading="lazy" class="image-clickable" alt="blog">
+          </figure>
+        </div>
+      </div>
+    `;
+  });
+
+  return content;
+}
+
+function createBadgeHtml(key) {
+  const entry = localeTexts.badges?.[key];
+  if (!entry) {
+    console.warn(`Missing badge locale for key="${key}"`);
+    return '';
+  }
+
+  const tooltip = entry.tooltip.replace(/"/g, '&quot;');
+  const label = entry.label;
+  const cls   = `badge badge–${key}`;
+  return `<span class="${cls}" data-tooltip="${tooltip}">${label}</span>`;
+}
+
+function createInlineBadgeHtml(attrs) {
+  const labelMatch = attrs.match(/label="([^"]*)"/);
+  if (!labelMatch) return '';
+  const label = labelMatch[1];
+
+  const colorMatch   = attrs.match(/color="([^"]*)"/);
+  const tooltipMatch = attrs.match(/tooltip="([^"]*)"/);
+
+  const style      = colorMatch   ? ` style="--badge-bg:${colorMatch[1]}"` : '';
+  const tooltipAttr = tooltipMatch ? ` data-tooltip="${tooltipMatch[1].replace(/"/g, '&quot;')}"` : '';
+
+  return `<span class="badge badge–inline"${style}${tooltipAttr}>${label}</span>`;
+}
+
+function parseBadges(str) {
+  // Inline form (has label="..."): {{badge label="..." [color="..."] [tooltip="..."]}}
+  str = str.replace(/\{\{badge\s+(label="[^"]*"[^}]*)\}\}/g, (_, attrs) =>
+    createInlineBadgeHtml(attrs)
+  );
+  // Locale key form: {{badge core}}
+  str = str.replace(/\{\{badge\s+(\w+)\}\}/g, (_, key) =>
+    createBadgeHtml(key)
+  );
+  return str;
+}
+
+
+async function parseUnitContainers(content) {
+  const unitContainerRegex = /{{unit "(\w+)"}}([\s\S]+?){{\/unit}}/g;
+  const matches = [...content.matchAll(unitContainerRegex)];
+
+  for (const match of matches) {
+    const unitId   = match[1];
+    const rawBlock = match[2];
+
+    const rawLines = rawBlock
+      .split('\n').map(l => l.trim()).filter(Boolean);
+
+    const parsedChanges = parseNestedChanges(rawLines);
+
+    const changes = parsedChanges.map(item => {
+      let html = item.content
+        .replace(/{{buff}}([\s\S]+?){{\/buff}}/g, '<span class="buff">$1</span>')
+        .replace(/{{nerf}}([\s\S]+?){{\/nerf}}/g, '<span class="nerf">$1</span>')
+        .replace(/{{adjust}}([\s\S]+?){{\/adjust}}/g, '<span class="adjust">$1</span>')
+        .replace(/->|→/g, '<span class="arrow">→</span>');
+
+      html = parseBadges(html);
+
+      return {
+        ...item,
+        content: html
+      };
+    });
+
+    const unitData = await loadUnitData(unitId);
+    if (!unitData || !unitData.name) {
+      console.warn(`No data for ${unitId}, skipping.`);
+      continue;
+    }
+    const unitModuleHTML = generateUnitModule(unitData, changes);
+
+    content = content.replace(match[0], unitModuleHTML);
+  }
+
+  return content;
+}
+
+async function parseDonations(content) {
+  const donationTag = /{{donations}}/g;
+  if (!donationTag.test(content)) return content;
+
+  const intro = localeTexts.blog?.donations
+    || "Before we proceed with the details of this update, we once again would like thank our generous sponsors to enabling our work here. If you would like to support us, you can give us a one-time donation on PayPal or a recurring contribution on Patreon:";
+
+  const buttons = `
+    <div class="donation-buttons">
+      <a href="https://www.patreon.com/TeamKopruluSC2" class="donation-btn patreon" target="_blank" rel="noopener">
+        <img src="/assets/img/logos/patreon-logo.svg" alt="Patreon" class="donation-btn__icon">
+        <span class="donation-btn__text">${localeTexts.blog?.patreon_cta || "Support on Patreon"}</span>
+      </a>
+      <a href="https://paypal.me/KopruluKat/" class="donation-btn paypal" target="_blank" rel="noopener">
+        <img src="/assets/img/logos/paypal-logo.svg" alt="PayPal" class="donation-btn__icon">
+        <span class="donation-btn__text">${localeTexts.blog?.paypal_cta || "Donate via PayPal"}</span>
+      </a>
+    </div>
+  `;
+
+  const html = `
+    <div class="donations-intro">
+      <p>${intro}</p>
+      ${buttons}
+    </div>
+  `;
+
+  return content.replace(donationTag, html);
+}
+
+/**
+ * Parse raw changes to determine indentation levels and whether they're list items
+ * @param {string[]} rawLines - Raw lines from unit module
+ * @return {Array} - Parsed changes with level and content
+ */
+function parseNestedChanges(rawLines) {
+  const parsedChanges = [];
+
+  const useBulletLists = rawLines.some(line => line.startsWith('-'));
+
+  if (!useBulletLists) {
+    return rawLines.map(line => ({
+      level: 0,
+      content: line
+    }));
+  }
+
+  for (const line of rawLines) {
+    const originalLine = line;
+    let level = 0;
+    let content = line;
+
+    if (line.startsWith('-')) {
+      content = line.substring(1).trimStart();
+      level = 0; // Top level bullet
+    }
+
+    else {
+      const match = line.match(/^(\s+)(-\s*.+)$/);
+      if (match) {
+        const indentation = match[1].length;
+        content = match[2].substring(1).trimStart(); 
+        level = Math.ceil(indentation / 2); 
+      } else if (line.match(/^\s+/)) {
+        const indentation = line.match(/^\s+/)[0].length;
+        content = line.trimStart();
+        level = Math.ceil(indentation / 2);
+      }
+    }
+
+    parsedChanges.push({
+      level,
+      content,
+      originalLine
+    });
+  }
+
+  return parsedChanges;
+}
+
+// Load unit data from units.json
+async function loadUnitsMap() {
+  const locale = localStorage.getItem('locale') || 'enUS';
+
+  let base = {};
+  try {
+    const res = await fetch('/assets/data/units.json');
+    if (res.ok) base = await res.json();
+  } catch {}
+
+  if (locale === 'enUS') return base;
+
+  try {
+    const res = await fetch(`/assets/data/units.${locale}.json`);
+    if (!res.ok) return base;
+    const localeData = await res.json();
+    const merged = { ...base };
+    for (const [id, entry] of Object.entries(localeData)) {
+      merged[id] = { ...base[id], ...entry };
+    }
+    return merged;
+  } catch {
+    return base;
+  }
+}
+
+async function loadUnitData(unitId) {
+  const locale = localStorage.getItem('locale') || 'enUS';
+
+  let base = {};
+  try {
+    const res = await fetch('/assets/data/units.json');
+    if (res.ok) {
+      const data = await res.json();
+      base = data[unitId] || {};
+    }
+  } catch {}
+
+  if (locale === 'enUS') return base;
+
+  try {
+    const res = await fetch(`/assets/data/units.${locale}.json`);
+    if (!res.ok) return base;
+    const data = await res.json();
+    const localeEntry = data[unitId];
+    if (!localeEntry) return base;
+    return { ...base, ...localeEntry };
+  } catch {
+    return base;
+  }
+}
+
+/**
+ * Generate HTML for the unit module with nested lists
+ * @param {object} unitData - Data for the unit (name, icon, etc.)
+ * @param {Array} changes - Array of processed changes with level and content
+ * @return {string} - HTML for the unit module
+ */
+function generateUnitModule(unitData, changes) {
+  if (!unitData.name) return '';
+
+  const hasNestedItems = changes.some(change => change.level > 0);
+
+  let changesHTML;
+
+  if (!hasNestedItems) {
+    changesHTML = changes.map(change => {
+      const useListItem = change.originalLine && change.originalLine.trim().startsWith('-');
+
+      if (useListItem) {
+        return `<li>${change.content}</li>`;
+      } else {
+        return `<p>${change.content}</p>`;
+      }
+    }).join('');
+
+    if (changes.some(change => change.originalLine && change.originalLine.trim().startsWith('-'))) {
+      changesHTML = `<ul>${changesHTML}</ul>`;
+    }
+  } else {
+    changesHTML = generateNestedListHTML(changes);
+  }
+
+  return `
+    <div class="unit-module-wrapper">
+      <div class="unit-icon-wrapper">
+        <div class="unit-icon-border">
+          <img src="/assets/img/elements/btn-border-element.webp" alt="Unit Border" width="100" height="100" />
+        </div>
+        <div class="unit-icon">
+          <img src="${unitData.icon}" alt="Unit Icon" width="100" height="100" />
+        </div>
+      </div>
+
+      <div class="unit-module">
+        <div class="unit-title-bar">
+          <h3 class="unit-title">${unitData.name}</h3>
+        </div>
+
+        <div class="unit-changes">
+          ${changesHTML}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Generate properly nested HTML list from parsed changes
+ * @param {Array} changes - Array of parsed changes with level and content
+ * @return {string} - Nested list HTML
+ */
+function generateNestedListHTML(changes) {
+  if (!changes || changes.length === 0) return '';
+
+  let html = '';
+  let currentLevel = -1;
+  let inList = false;
+
+  for (let i = 0; i < changes.length; i++) {
+    const change = changes[i];
+    const isListItem = change.originalLine && change.originalLine.trim().startsWith('-');
+
+    if (isListItem) {
+      if (!inList) {
+        html += '<ul>';
+        inList = true;
+        currentLevel = 0;
+      }
+
+      if (change.level > currentLevel) {
+        for (let j = currentLevel; j < change.level; j++) {
+          html += '<ul>';
+        }
+      } else if (change.level < currentLevel) {
+        for (let j = currentLevel; j > change.level; j--) {
+          html += '</ul></li>';
+        }
+      } else if (currentLevel > 0 && i > 0) {
+        html += '</li>';
+      }
+
+      html += `<li>${change.content}`;
+      currentLevel = change.level;
+    } else {
+      if (inList) {
+        while (currentLevel >= 0) {
+          html += '</li></ul>';
+          currentLevel--;
+        }
+        inList = false;
+      }
+      html += `<p>${change.content}</p>`;
+    }
+  }
+
+  if (inList) {
+    html += '</li>';
+    while (currentLevel >= 0) {
+      html += '</ul>';
+      currentLevel--;
+    }
+  }
+
+  return html;
+}
+

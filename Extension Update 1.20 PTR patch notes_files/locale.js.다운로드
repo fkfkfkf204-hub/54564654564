@@ -1,0 +1,227 @@
+// --------------------------------------------
+// locale.js
+// --------------------------------------------
+
+// Add a locale code here when its translations are ready.
+// Locales not in this list will be hidden from the selector.
+const ENABLED_LOCALES = ['enUS', 'koKR', 'esES', 'zhCN'];
+
+let localeTexts = {};
+
+async function loadLocaleTexts(locale, pageKey) {
+  console.log('[locale] loadLocaleTexts: ' + locale + ', ' + pageKey);
+  let common = {}, page = {};
+
+  // 1) load common.json (must succeed or log error)
+  try {
+    common = await fetch('/assets/data/locales/' + locale + '.common.json')
+                    .then(function(r) {
+                      if (!r.ok) throw new Error(r.statusText);
+                      return r.json();
+                    });
+  } catch (err) {
+    console.error('[locale] error loading common.json for ' + locale + ':', err);
+  }
+
+  // 2) decide which page file to try
+  var isPost = !!pageKey && pageKey.startsWith('post');
+  var pageFile = isPost
+    ? '/assets/data/locales/' + locale + '.blogpostcommon.json'
+    : '/assets/data/locales/' + locale + '.' + pageKey + '.json';
+
+  // 3) try loading the page file; on 404 fall back to the enUS page file so
+  //    pages with untranslated locale files still render correctly.
+  try {
+    page = await fetch(pageFile)
+                  .then(async function(r) {
+                    if (!r.ok) {
+                      console.warn('[locale] no page file at ' + pageFile + ', status ' + r.status);
+                      if (locale !== 'enUS') {
+                        var fallbackFile = isPost
+                          ? '/assets/data/locales/enUS.blogpostcommon.json'
+                          : '/assets/data/locales/enUS.' + pageKey + '.json';
+                        console.log('[locale] falling back to ' + fallbackFile);
+                        try {
+                          return await fetch(fallbackFile).then(function(fr) {
+                            return fr.ok ? fr.json() : {};
+                          });
+                        } catch (fe) { return {}; }
+                      }
+                      return {};
+                    }
+                    return r.json();
+                  });
+  } catch (err) {
+    console.warn('[locale] failed to parse ' + pageFile + ':', err);
+    page = {};
+  }
+
+  // 4) merge
+  localeTexts = Object.assign({}, common, page);
+  console.log('[locale] localeTexts merged:', localeTexts);
+}
+
+function applyTexts() {
+  console.log('[locale] applyTexts()');
+
+  document.querySelectorAll('[data-text-html]').forEach(function(el) {
+    var key = el.getAttribute('data-text-html');
+    var parts = key.split('.');
+    var str = localeTexts;
+    for (var i = 0; i < parts.length; i++) {
+      if (str == null) break;
+      str = str[parts[i]];
+    }
+    if (typeof str !== 'string') {
+      console.warn('[locale] missing translation for "' + key + '"');
+      return;
+    }
+    el.innerHTML = str;
+  });
+
+  document.querySelectorAll('[data-text]').forEach(function(el) {
+    var key = el.getAttribute('data-text');
+    var parts = key.split('.');
+    var str = localeTexts;
+    for (var i = 0; i < parts.length; i++) {
+      if (str == null) break;
+      str = str[parts[i]];
+    }
+    if (typeof str !== 'string') {
+      console.warn('[locale] missing translation for "' + key + '"');
+      return;
+    }
+    if (el.tagName.toLowerCase() === 'title') {
+      document.title = str;
+    } else if (str.indexOf('**') !== -1 || str.indexOf('`') !== -1) {
+      el.innerHTML = renderInlineMd(str);
+    } else {
+      el.textContent = str;
+    }
+  });
+}
+
+function renderInlineMd(s) {
+  s = s.replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  return s;
+}
+
+function derivePageKey() {
+  if (document.body.dataset.pageKey) {
+    return document.body.dataset.pageKey;
+  }
+  var name = window.location.pathname.split('/').pop().replace('.html', '');
+  return name || 'index';
+}
+
+function detectDefaultLocale() {
+  // 1. Check if the user already chose one (and it is still enabled)
+  var stored = localStorage.getItem('locale');
+  if (stored && ENABLED_LOCALES.indexOf(stored) !== -1) return stored;
+
+  // 2. Otherwise look at the browser language
+  var navLang = (navigator.language || navigator.userLanguage || '').toLowerCase();
+  if (navLang.startsWith('ko') && ENABLED_LOCALES.indexOf('koKR') !== -1) return 'koKR';
+  if (navLang.startsWith('ru') && ENABLED_LOCALES.indexOf('ruRU') !== -1) return 'ruRU';
+  if (navLang.startsWith('zh') && ENABLED_LOCALES.indexOf('zhCN') !== -1) return 'zhCN';
+  if (navLang.startsWith('it') && ENABLED_LOCALES.indexOf('itIT') !== -1) return 'itIT';
+  if (navLang.startsWith('es') && ENABLED_LOCALES.indexOf('esES') !== -1) return 'esES';
+  return 'enUS';
+}
+
+
+document.addEventListener('header:loaded', setupLocaleSelectors);
+document.addEventListener('DOMContentLoaded', function() {
+  // fallback for mobile menu if it is loaded via include
+  if (document.querySelector('#locale-selector-mobile')) {
+    setupLocaleSelectors();
+  }
+});
+
+function setupLocaleSelectors() {
+  console.log('[locale] setting up locale selectors');
+
+  var allToggles = [
+    { toggle: '#current-locale', flag: '#locale-flag', label: '#locale-label' },
+    { toggle: '#current-locale-mobile', flag: '#locale-flag-mobile', label: '#locale-label-mobile' }
+  ];
+
+  var allItems = document.querySelectorAll('[id^="locale-submenu"] [data-locale]');
+
+  function flagFor(loc) {
+    var map = {
+      koKR: ['/assets/img/flags/kr.svg', 'KR flag'],
+      ruRU: ['/assets/img/flags/ru.svg', 'RU flag'],
+      zhCN: ['/assets/img/flags/cn.svg', 'CN flag'],
+      itIT: ['/assets/img/flags/it.svg', 'IT flag'],
+      esES: ['/assets/img/flags/es.svg', 'ES flag']
+    };
+    return map[loc] || ['/assets/img/flags/us.svg', 'US flag'];
+  }
+
+  function updateToggles(loc) {
+    var pair = flagFor(loc);
+    var src = pair[0];
+    var alt = pair[1];
+    allToggles.forEach(function(t) {
+      var flagEl = document.querySelector(t.flag);
+      var labelEl = document.querySelector(t.label);
+      if (flagEl) { flagEl.src = src; flagEl.alt = alt; }
+      if (labelEl) {
+        labelEl.textContent = (localeTexts.locale && localeTexts.locale[loc]) || loc;
+      }
+    });
+  }
+
+  // Hide locale items that are not yet enabled
+  allItems.forEach(function(el) {
+    var loc = el.dataset.locale;
+    if (ENABLED_LOCALES.indexOf(loc) === -1) {
+      var li = el.closest('li');
+      if (li) li.style.display = 'none';
+    }
+  });
+
+  // Add flag images to submenu items
+  allItems.forEach(function(el) {
+    var loc = el.dataset.locale;
+    if (ENABLED_LOCALES.indexOf(loc) === -1) return;
+    var pair = flagFor(loc);
+    if (!el.querySelector('img.locale-flag')) {
+      var img = document.createElement('img');
+      img.src = pair[0];
+      img.alt = pair[1];
+      img.width = 20;
+      img.height = 14;
+      img.className = 'locale-flag';
+      img.style.marginRight = '6px';
+      el.prepend(img);
+    }
+  });
+
+  // Bind click events
+  allItems.forEach(function(el) {
+    if (ENABLED_LOCALES.indexOf(el.dataset.locale) === -1) return;
+    el.addEventListener('click', function(e) {
+      e.preventDefault();
+      var chosen = el.dataset.locale;
+      localStorage.setItem('locale', chosen);
+      window.location.reload();
+    });
+  });
+
+  // Initial load: fetch locale data first, then update everything
+  (async function() {
+    var locale = detectDefaultLocale();
+    var pageKey = derivePageKey();
+    console.log('[locale] initial load:', locale, pageKey);
+    await loadLocaleTexts(locale, pageKey);
+    applyTexts();
+    document.dispatchEvent(new CustomEvent('locale:ready'));
+    updateToggles(locale);
+  })();
+}

@@ -1,0 +1,25 @@
+// Single source of truth for external URLs used across the site.
+// To change a link, edit only this file — any <a data-link="KEY"> gets its
+// href updated at runtime.
+window.SITE_LINKS = {
+  discord:    "https://discord.gg/fDvwdnkDeB",
+  patreon:    "https://www.patreon.com/TeamKopruluSC2",
+  paypal:     "https://paypal.me/KopruluKat/",
+  liquipedia: "https://liquipedia.net/starcraft2/User:SCEvo/Main_Page",
+  launcher:   "https://github.com/TeamKoprulu/SCEvoComplete/releases/download/Update-1.19-(Partial-Release)/SC.Evo.Launcher.0.3.zip"
+};
+
+(function () {
+  function apply() {
+    document.querySelectorAll('[data-link]').forEach(function (el) {
+      var key = el.getAttribute('data-link');
+      var url = window.SITE_LINKS[key];
+      if (url) el.setAttribute('href', url);
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply);
+  } else {
+    apply();
+  }
+})();
