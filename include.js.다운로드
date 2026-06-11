@@ -1,0 +1,31 @@
+document.addEventListener('DOMContentLoaded', function () {
+  var includes = document.querySelectorAll('[data-include]');
+
+  if (includes.length === 0) {
+    // Templates are pre-inlined — fire events immediately
+    document.dispatchEvent(new Event('header:loaded'));
+    document.dispatchEvent(new Event('mobile-menu:loaded'));
+    return;
+  }
+
+  // Fallback: runtime template loading (if data-include markers still exist)
+  includes.forEach(async (el) => {
+    const file = el.getAttribute('data-include');
+    try {
+      const res = await fetch(file);
+      const html = await res.text();
+      el.innerHTML = html;
+
+      if (file.includes('header.html')) {
+        document.dispatchEvent(new Event('header:loaded'));
+      }
+
+      if (file.includes('mobile-menu.html')) {
+        document.dispatchEvent(new Event('mobile-menu:loaded'));
+      }
+
+    } catch (err) {
+      console.error('[include.js] failed to include "' + file + '":', err);
+    }
+  });
+});

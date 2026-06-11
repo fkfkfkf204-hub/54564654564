@@ -1,0 +1,54 @@
+// recent-posts.js — reads enriched postList.json (no per-post .md fetches needed)
+
+async function loadRecentPosts() {
+  const widgetWrap = document.querySelector('.recent-post-wrap');
+  if (!widgetWrap) return;
+
+  // 1) fetch enriched post list
+  let posts;
+  try {
+    const resp = await fetch('/assets/data/postList.json');
+    if (!resp.ok) throw new Error(resp.statusText);
+    posts = await resp.json();
+  } catch (err) {
+    console.error('Could not load postList.json:', err);
+    return;
+  }
+
+  // 2) filter and sort newest first
+  const validPosts = posts.filter(p => p.date);
+  validPosts.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  // 3) take only the first three
+  const recent = validPosts.slice(0, 3);
+
+  // 4) render
+  widgetWrap.innerHTML = '';
+  for (const post of recent) {
+    const formattedDate = formatBlogDate(post.date);
+    const postEl = document.createElement('div');
+    postEl.className = 'recent-post';
+    postEl.innerHTML = `
+      <div class="media-img">
+        <a href="${post.link}">
+          <img src="${post['blog-image']}" alt="${post.title}">
+        </a>
+      </div>
+      <div class="media-body">
+        <div class="recent-post-meta">
+          <a href="${post.link}">
+            <i class="far fa-calendar-alt"></i>
+            ${formattedDate}
+          </a>
+        </div>
+        <h4 class="post-title">
+          <a href="${post.link}">${post.title}</a>
+        </h4>
+      </div>
+    `;
+    widgetWrap.appendChild(postEl);
+  }
+}
+
+// automatically run on pages that include this script
+document.addEventListener('DOMContentLoaded', loadRecentPosts);
